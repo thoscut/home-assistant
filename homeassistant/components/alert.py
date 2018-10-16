@@ -16,7 +16,9 @@ from homeassistant.const import (
     CONF_ENTITY_ID, STATE_IDLE, CONF_NAME, CONF_STATE, STATE_ON, STATE_OFF,
     SERVICE_TURN_ON, SERVICE_TURN_OFF, SERVICE_TOGGLE, ATTR_ENTITY_ID)
 from homeassistant.helpers.entity import ToggleEntity
+from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.helpers import service, event
+from homeassistant.helpers.restore_state import async_get_last_state
 import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +32,9 @@ CONF_REPEAT = 'repeat'
 CONF_SKIP_FIRST = 'skip_first'
 CONF_ALERT_MESSAGE = 'message'
 CONF_DONE_MESSAGE = 'done_message'
+
+ATTR_FIRING = 'firing'
+ATTR_ACK = 'ack'
 
 DEFAULT_CAN_ACK = True
 DEFAULT_SKIP_FIRST = False
@@ -117,6 +122,9 @@ async def async_setup(hass, config):
         DOMAIN, SERVICE_TOGGLE, async_handle_alert_service,
         schema=ALERT_SERVICE_SCHEMA)
 
+    component = EntityComponent(_LOGGER, DOMAIN, hass)
+    await component.async_add_entities(entities)
+
     tasks = [alert.async_update_ha_state() for alert in entities]
     if tasks:
         await asyncio.wait(tasks, loop=hass.loop)
@@ -151,13 +159,29 @@ class Alert(ToggleEntity):
         self._next_delay = 0
 
         self._firing = False
-        self._ack = False
+        self._ack = initial
+        if self._ack is None:
+            _LOGGER.debug("Ack is none (%s)", entity_id)
         self._cancel = None
         self._send_done_message = False
         self.entity_id = ENTITY_ID_FORMAT.format(entity_id)
 
         event.async_track_state_change(
             hass, watched_entity_id, self.watched_entity_change)
+
+    async def async_added_to_hass(self):
+        """Run when entity about to be added."""
+        # Check If we have an old state
+        _LOGGER.debug("Looking for last state for (%s)", self.entity_id)
+        old_state = await async_get_last_state(self.hass, self.entity_id)
+        if old_state is not None and self._ack is None:
+            _LOGGER.debug("Applying last state (%s)", self.entity_id)
+            # Always restore overwriting default
+            self._ack = old_state.attributes.get(ATTR_ACK)
+            self._firing = old_state.attributes.get(ATTR_FIRING)
+        else:
+            _LOGGER.debug("No last state found or initial value set (%s)",
+                          self.entity_id)
 
     @property
     def name(self):
@@ -182,6 +206,13 @@ class Alert(ToggleEntity):
     def hidden(self):
         """Hide the alert when it is not firing."""
         return not self._can_ack or not self._firing
+    @property
+    def state_attributes(self):
+        """Return the state attributes."""
+        return {
+            ATTR_FIRING: self._firing,
+            ATTR_ACK: self._ack
+        }
 
     async def watched_entity_change(self, entity, from_state, to_state):
         """Determine if the alert should start or stop."""
